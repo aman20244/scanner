@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==========================================
-# 🛡️ ELITE RECON ENGINE v3 - CHAOS EDITION
+# 🛡️ ELITE RECON ENGINE v5 - FULL PRODUCTION
 # ==========================================
 
 set -euo pipefail
@@ -9,170 +9,168 @@ IFS=$'\n\t'
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-# Setup file structure
 mkdir -p db logs
-touch db/subdomains.txt db/endpoints.txt db/js_state.txt db/live_maps.txt db/domain_health.txt
+touch db/subdomains.txt db/domain_health.txt db/js_state.txt db/endpoints.txt db/live_maps.txt
 
 ALERT_FILE="slack_alert.txt"
 > "$ALERT_FILE"
 
-echo "🚀 [$(date)] - Ultimate Recon Engine Initiated"
+echo "🚀 Recon Started: $(date)"
 
 # ==========================================
-# 🌍 1. SUBDOMAIN ENUMERATION
+# 🌍 1. SUBDOMAIN ENUMERATION (ALL SOURCES)
 # ==========================================
 
-echo "🔎 Running Discovery..."
-
-# Standard tooling
+echo "🔎 Running subfinder..."
 subfinder -dL targets.txt -silent -all -o "$TMP_DIR/sf.txt" || true
-chaos -dL targets.txt -silent > "$TMP_DIR/chaos.txt" || true
 
-# Robust crt.sh querying
+echo "🔎 Running amass (passive)..."
+amass enum -passive -df targets.txt -silent -o "$TMP_DIR/amass.txt" || true
+
+echo "🔎 Running chaos..."
+chaos -dL targets.txt -silent -o "$TMP_DIR/chaos.txt" || true
+
 echo "🌐 Querying crt.sh..."
 while read -r domain; do
-    sleep 1
-    response=$(curl -s --max-time 40 "https://crt.sh/?q=%25.${domain}&output=json" || true)
-    if [[ "$response" == \[* ]]; then
-        echo "$response" | jq -r '.[].name_value' 2>/dev/null \
-            | sed 's/\*\.//g' >> "$TMP_DIR/crt.txt" || true
-    fi
+  curl -s --max-time 40 "https://crt.sh/?q=%25.${domain}&output=json" \
+  | jq -r '.[].name_value' 2>/dev/null \
+  | sed 's/\*\.//g' >> "$TMP_DIR/crt.txt" || true
 done < targets.txt
 
-# THC Passive Sources
-echo "🌐 Querying THC Sources..."
+echo "🌐 Querying THC sb/cn..."
 while read -r domain; do
-    sleep 1
-    curl -s --max-time 30 "https://ip.thc.org/sb/${domain}" \
-        | grep -Eo "([a-zA-Z0-9._-]+\.)+${domain}" >> "$TMP_DIR/thc_sb.txt" || true
-    sleep 1
-    curl -s --max-time 30 "https://ip.thc.org/cn/${domain}" \
-        | grep -Eo "([a-zA-Z0-9._-]+\.)+${domain}" >> "$TMP_DIR/thc_cn.txt" || true
+  curl -s --max-time 30 "https://ip.thc.org/sb/${domain}" \
+  | grep -Eo "([a-zA-Z0-9._-]+\.)+${domain}" >> "$TMP_DIR/thc_sb.txt" || true
+  curl -s --max-time 30 "https://ip.thc.org/cn/${domain}" \
+  | grep -Eo "([a-zA-Z0-9._-]+\.)+${domain}" >> "$TMP_DIR/thc_cn.txt" || true
 done < targets.txt
 
-# --- Merge & Normalize ---
-cat \
-  "$TMP_DIR/sf.txt" \
-  "$TMP_DIR/chaos.txt" \
-  "$TMP_DIR/crt.txt" \
-  "$TMP_DIR/thc_sb.txt" \
-  "$TMP_DIR/thc_cn.txt" \
-  2>/dev/null \
+# Merge all
+cat "$TMP_DIR/"*.txt 2>/dev/null \
 | tr '[:upper:]' '[:lower:]' \
 | sed 's/\.$//' \
 | sort -u > "$TMP_DIR/subs_raw.txt"
 
-sort -u db/subdomains.txt -o db/subdomains.txt
+# ==========================================
+# 🛡️ 2. WILDCARD FILTER + RESOLUTION
+# ==========================================
 
-comm -23 "$TMP_DIR/subs_raw.txt" db/subdomains.txt > "$TMP_DIR/new_subs.txt" || true
+echo "🛡️ Filtering Wildcard DNS..."
+dnsx -l "$TMP_DIR/subs_raw.txt" -wd -silent -o "$TMP_DIR/subs_resolved.txt"
+
+# ==========================================
+# 🧠 3. STATE MANAGEMENT (anew)
+# ==========================================
+
+echo "🧠 Detecting new subdomains..."
+cat "$TMP_DIR/subs_resolved.txt" \
+| anew db/subdomains.txt > "$TMP_DIR/new_subs.txt"
 
 if [ -s "$TMP_DIR/new_subs.txt" ]; then
-    echo "🚨 *NEW SUBDOMAINS FOUND*" >> "$ALERT_FILE"
-    head -n 10 "$TMP_DIR/new_subs.txt" >> "$ALERT_FILE"
-    [[ $(wc -l < "$TMP_DIR/new_subs.txt") -gt 10 ]] && echo "...and more in db/subdomains.txt" >> "$ALERT_FILE"
-    cat "$TMP_DIR/new_subs.txt" >> db/subdomains.txt
-    sort -u db/subdomains.txt -o db/subdomains.txt
+  echo "🚨 NEW SUBDOMAINS" >> "$ALERT_FILE"
+  head -n 15 "$TMP_DIR/new_subs.txt" >> "$ALERT_FILE"
 fi
 
+TOTAL=$(wc -l < db/subdomains.txt)
+echo "📊 Total subdomains tracked: $TOTAL"
+
 # ==========================================
-# 🩺 2. DOMAIN HEALTH CHECK
+# 🩺 4. HEALTH MONITORING
 # ==========================================
 
-echo "🩺 Checking health and status codes..."
+echo "🩺 Probing with httpx..."
+httpx -l db/subdomains.txt -silent -t 50 -rl 100 \
+-status-code -no-color > "$TMP_DIR/health.txt" || true
 
-httpx -l db/subdomains.txt -silent -t 20 -rl 40 -status-code -fr -title -no-color \
-    > "$TMP_DIR/health_raw.txt" || true
+awk '{gsub(/\[|\]/,"",$2); print $1"|"$2}' "$TMP_DIR/health.txt" \
+| sort -u > "$TMP_DIR/current_health.txt"
 
-awk '{gsub(/\[|\]/,"",$2); print $1"|"$2}' "$TMP_DIR/health_raw.txt" \
-    | sort -u > "$TMP_DIR/current_health.txt"
+cat "$TMP_DIR/current_health.txt" \
+| anew db/domain_health.txt > "$TMP_DIR/health_changes.txt"
 
+if [ -s "$TMP_DIR/health_changes.txt" ]; then
+  echo "🔄 STATUS CHANGES" >> "$ALERT_FILE"
+  head -n 15 "$TMP_DIR/health_changes.txt" >> "$ALERT_FILE"
+fi
+
+awk -F'|' '$2=="200"{print $1}' "$TMP_DIR/current_health.txt" \
 > "$TMP_DIR/live_hosts.txt"
 
-while IFS='|' read -r domain new_status; do
-    [[ "$new_status" == "200" ]] && echo "$domain" >> "$TMP_DIR/live_hosts.txt"
-    old_status=$(awk -v dom="$domain" -F'|' '$1==dom {print $2}' db/domain_health.txt)
-    old_status=${old_status:-NEW}
-    if [ "$old_status" != "NEW" ] && [ "$old_status" != "$new_status" ]; then
-        if [ "$new_status" == "200" ] && [[ "$old_status" =~ ^(401|403|404|302|500)$ ]]; then
-            echo "🔓 *AUTH DROPPED:* $domain ($old_status ➔ 200)" >> "$ALERT_FILE"
-        elif [ "$new_status" == "404" ]; then
-            echo "💀 *POTENTIAL TAKEOVER:* $domain ($old_status ➔ 404)" >> "$ALERT_FILE"
-        else
-            echo "🔄 *STATE CHANGE:* $domain ($old_status ➔ $new_status)" >> "$ALERT_FILE"
-        fi
-    fi
-done < "$TMP_DIR/current_health.txt"
-
-# --- Dead Hosts Detection ---
-awk -F'|' '{print $1}' db/domain_health.txt | sort -u > "$TMP_DIR/old.txt"
-awk -F'|' '{print $1}' "$TMP_DIR/current_health.txt" | sort -u > "$TMP_DIR/new.txt"
-comm -23 "$TMP_DIR/old.txt" "$TMP_DIR/new.txt" > "$TMP_DIR/dead.txt" || true
-
-if [ -s "$TMP_DIR/dead.txt" ]; then
-    while read -r d; do
-        old=$(awk -v dom="$d" -F'|' '$1==dom {print $2}' db/domain_health.txt)
-        echo "🪦 *OFFLINE:* $d (Was $old)" >> "$ALERT_FILE"
-    done < "$TMP_DIR/dead.txt"
-fi
-
-cp "$TMP_DIR/current_health.txt" db/domain_health.txt
+LIVE=$(wc -l < "$TMP_DIR/live_hosts.txt" 2>/dev/null || echo 0)
+echo "🌐 Live hosts: $LIVE"
 
 # ==========================================
-# 📦 3. JS MONITORING & SOURCE MAPS
+# 📦 5. CONCURRENT JS MONITORING
 # ==========================================
-
-echo "📦 Crawling for JavaScript and diffing changes..."
 
 if [ -s "$TMP_DIR/live_hosts.txt" ]; then
-    katana -list "$TMP_DIR/live_hosts.txt" -jc -kf all -fx -d 3 -silent -concurrency 3 \
-        | grep "\.js$" | sort -u > "$TMP_DIR/js_list.txt" || true
-
-    while read -r js_url; do
-        sleep 0.5
-        status=$(curl -sL -o /dev/null -w "%{http_code}" --max-time 15 "$js_url" || echo "000")
-        [ "$status" != "200" ] && continue
-        asset="$TMP_DIR/asset.js"
-        curl -sL --max-time 20 "$js_url" -o "$asset" || continue
-        [ ! -s "$asset" ] && continue
-        new_hash=$(sha256sum "$asset" | awk '{print $1}')
-        old_hash=$(awk -v url="$js_url" -F'|' '$1==url {print $2}' db/js_state.txt)
-        old_hash=${old_hash:-NEW}
-        if [ "$new_hash" != "$old_hash" ]; then
-            echo "⚡ *JS CHANGE:* $js_url" >> "$ALERT_FILE"
-            grep -vF "${js_url}|" db/js_state.txt > "$TMP_DIR/js_tmp" || true
-            echo "$js_url|$new_hash|$(date +%s)" >> "$TMP_DIR/js_tmp"
-            mv "$TMP_DIR/js_tmp" db/js_state.txt
-            # Source maps
-            if curl -sI --max-time 5 "${js_url}.map" | grep -q "200 OK"; then
-                if ! grep -qF "${js_url}.map" db/live_maps.txt; then
-                    echo "🔥 *MAP FOUND:* ${js_url}.map" >> "$ALERT_FILE"
-                    echo "${js_url}.map" >> db/live_maps.txt
-                fi
-            fi
-            # Extract Endpoints
-            grep -oP "(?<=[\"'\`])(https?://[^\"'\` ]+|/[^\"'\` ]+)(?=[\"'\`])" "$asset" \
-                | sort -u >> "$TMP_DIR/raw_endpoints.txt" || true
-        fi
-    done < "$TMP_DIR/js_list.txt"
+  echo "📦 Crawling JS with katana..."
+  katana -list "$TMP_DIR/live_hosts.txt" -silent -jc -d 2 -concurrency 5 \
+  | grep "\.js$" | sort -u > "$TMP_DIR/js_list.txt"
 fi
 
-# ==========================================
-# 🎯 4. ENDPOINT DIFF
-# ==========================================
+process_js() {
+  js=$1
+  res=$(curl -sL -w "%{http_code}" "$js" -o "$TMP_DIR/tmp_js")
+  if [ "$res" = "200" ]; then
+    hash=$(sha256sum "$TMP_DIR/tmp_js" | awk '{print $1}')
+    echo "$js|$hash"
+  fi
+}
+export -f process_js
+export TMP_DIR
 
-echo "🎯 Analyzing endpoints..."
+cat "$TMP_DIR/js_list.txt" 2>/dev/null \
+| xargs -I % -P 20 bash -c 'process_js %' \
+> "$TMP_DIR/js_hashes.txt" || true
 
-if [ -f "$TMP_DIR/raw_endpoints.txt" ]; then
-    sort -u "$TMP_DIR/raw_endpoints.txt" -o "$TMP_DIR/raw_endpoints.txt"
-    sort -u db/endpoints.txt -o db/endpoints.txt
-    comm -23 "$TMP_DIR/raw_endpoints.txt" db/endpoints.txt > "$TMP_DIR/new_endpoints.txt" || true
-    if [ -s "$TMP_DIR/new_endpoints.txt" ]; then
-        echo -e "\n🎯 *NEW ENDPOINTS*" >> "$ALERT_FILE"
-        head -n 10 "$TMP_DIR/new_endpoints.txt" >> "$ALERT_FILE"
-        [[ $(wc -l < "$TMP_DIR/new_endpoints.txt") -gt 10 ]] && echo "...and more in db/endpoints.txt" >> "$ALERT_FILE"
-        cat "$TMP_DIR/new_endpoints.txt" >> db/endpoints.txt
-        sort -u db/endpoints.txt -o db/endpoints.txt
+cat "$TMP_DIR/js_hashes.txt" \
+| anew db/js_state.txt > "$TMP_DIR/js_changes.txt"
+
+if [ -s "$TMP_DIR/js_changes.txt" ]; then
+  echo "⚡ JS CHANGES" >> "$ALERT_FILE"
+  head -n 15 "$TMP_DIR/js_changes.txt" >> "$ALERT_FILE"
+fi
+
+# Source Map Detection
+grep "\.js|" "$TMP_DIR/js_changes.txt" | cut -d'|' -f1 \
+| while read -r js; do
+    if curl -sI "${js}.map" | grep -q "200"; then
+      echo "${js}.map" | anew db/live_maps.txt >> "$ALERT_FILE"
     fi
+done
+
+# ==========================================
+# 🎯 6. ENDPOINT EXTRACTION
+# ==========================================
+
+echo "🎯 Extracting endpoints..."
+> "$TMP_DIR/endpoints_raw.txt"
+
+for js in $(cut -d'|' -f1 "$TMP_DIR/js_hashes.txt" 2>/dev/null); do
+  curl -sL "$js" \
+  | grep -oP "(?<=[\"'\`])(https?://[^\"'\` ]+|/[^\"'\` ]+)(?=[\"'\`])" \
+  >> "$TMP_DIR/endpoints_raw.txt" || true
+done
+
+sort -u "$TMP_DIR/endpoints_raw.txt" > "$TMP_DIR/endpoints_clean.txt"
+
+cat "$TMP_DIR/endpoints_clean.txt" \
+| anew db/endpoints.txt > "$TMP_DIR/new_endpoints.txt"
+
+if [ -s "$TMP_DIR/new_endpoints.txt" ]; then
+  echo "🎯 NEW ENDPOINTS" >> "$ALERT_FILE"
+  head -n 15 "$TMP_DIR/new_endpoints.txt" >> "$ALERT_FILE"
 fi
 
-echo "✅ Finished: $(date)"
+# ==========================================
+# 📨 7. ALERT SUMMARY
+# ==========================================
+
+if [ -s "$ALERT_FILE" ]; then
+  echo -e "\n📢 Recon Alerts Generated"
+else
+  echo "No new changes detected."
+fi
+
+echo "✅ Recon Completed: $(date)"
