@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==========================================
-# 🛡️ ELITE RECON ENGINE v3 - THE ULTIMATE BUILD
+# 🛡️ ELITE RECON ENGINE v3 - CHAOS EDITION
 # ==========================================
 
 set -euo pipefail
@@ -26,19 +26,16 @@ echo "🔎 Running Discovery..."
 
 # Standard tooling
 subfinder -dL targets.txt -silent -all -o "$TMP_DIR/sf.txt" || true
-timeout 15m amass enum -passive -dL targets.txt -o "$TMP_DIR/am.txt" || true
+chaos -dL targets.txt -silent > "$TMP_DIR/chaos.txt" || true
 
-# Robust crt.sh querying (Prevents jq crashes when crt.sh API goes down)
+# Robust crt.sh querying
 echo "🌐 Querying crt.sh..."
 while read -r domain; do
     sleep 1
     response=$(curl -s --max-time 40 "https://crt.sh/?q=%25.${domain}&output=json" || true)
-    
     if [[ "$response" == \[* ]]; then
         echo "$response" | jq -r '.[].name_value' 2>/dev/null \
-            | tr '\n' '\n' \
-            | sed 's/\*\.//g' \
-            >> "$TMP_DIR/crt.txt" || true
+            | sed 's/\*\.//g' >> "$TMP_DIR/crt.txt" || true
     fi
 done < targets.txt
 
@@ -56,7 +53,7 @@ done < targets.txt
 # --- Merge & Normalize ---
 cat \
   "$TMP_DIR/sf.txt" \
-  "$TMP_DIR/am.txt" \
+  "$TMP_DIR/chaos.txt" \
   "$TMP_DIR/crt.txt" \
   "$TMP_DIR/thc_sb.txt" \
   "$TMP_DIR/thc_cn.txt" \
@@ -72,10 +69,7 @@ comm -23 "$TMP_DIR/subs_raw.txt" db/subdomains.txt > "$TMP_DIR/new_subs.txt" || 
 if [ -s "$TMP_DIR/new_subs.txt" ]; then
     echo "🚨 *NEW SUBDOMAINS FOUND*" >> "$ALERT_FILE"
     head -n 10 "$TMP_DIR/new_subs.txt" >> "$ALERT_FILE"
-    
-    # Anti-spam for notifications
     [[ $(wc -l < "$TMP_DIR/new_subs.txt") -gt 10 ]] && echo "...and more in db/subdomains.txt" >> "$ALERT_FILE"
-    
     cat "$TMP_DIR/new_subs.txt" >> db/subdomains.txt
     sort -u db/subdomains.txt -o db/subdomains.txt
 fi
@@ -96,10 +90,8 @@ awk '{gsub(/\[|\]/,"",$2); print $1"|"$2}' "$TMP_DIR/health_raw.txt" \
 
 while IFS='|' read -r domain new_status; do
     [[ "$new_status" == "200" ]] && echo "$domain" >> "$TMP_DIR/live_hosts.txt"
-
     old_status=$(awk -v dom="$domain" -F'|' '$1==dom {print $2}' db/domain_health.txt)
     old_status=${old_status:-NEW}
-
     if [ "$old_status" != "NEW" ] && [ "$old_status" != "$new_status" ]; then
         if [ "$new_status" == "200" ] && [[ "$old_status" =~ ^(401|403|404|302|500)$ ]]; then
             echo "🔓 *AUTH DROPPED:* $domain ($old_status ➔ 200)" >> "$ALERT_FILE"
@@ -132,39 +124,31 @@ cp "$TMP_DIR/current_health.txt" db/domain_health.txt
 echo "📦 Crawling for JavaScript and diffing changes..."
 
 if [ -s "$TMP_DIR/live_hosts.txt" ]; then
-
     katana -list "$TMP_DIR/live_hosts.txt" -jc -kf all -fx -d 3 -silent -concurrency 3 \
         | grep "\.js$" | sort -u > "$TMP_DIR/js_list.txt" || true
 
     while read -r js_url; do
         sleep 0.5
-
         status=$(curl -sL -o /dev/null -w "%{http_code}" --max-time 15 "$js_url" || echo "000")
         [ "$status" != "200" ] && continue
-
         asset="$TMP_DIR/asset.js"
         curl -sL --max-time 20 "$js_url" -o "$asset" || continue
         [ ! -s "$asset" ] && continue
-
         new_hash=$(sha256sum "$asset" | awk '{print $1}')
         old_hash=$(awk -v url="$js_url" -F'|' '$1==url {print $2}' db/js_state.txt)
         old_hash=${old_hash:-NEW}
-
         if [ "$new_hash" != "$old_hash" ]; then
             echo "⚡ *JS CHANGE:* $js_url" >> "$ALERT_FILE"
-
             grep -vF "${js_url}|" db/js_state.txt > "$TMP_DIR/js_tmp" || true
             echo "$js_url|$new_hash|$(date +%s)" >> "$TMP_DIR/js_tmp"
             mv "$TMP_DIR/js_tmp" db/js_state.txt
-
-            # Check for source maps
+            # Source maps
             if curl -sI --max-time 5 "${js_url}.map" | grep -q "200 OK"; then
                 if ! grep -qF "${js_url}.map" db/live_maps.txt; then
                     echo "🔥 *MAP FOUND:* ${js_url}.map" >> "$ALERT_FILE"
                     echo "${js_url}.map" >> db/live_maps.txt
                 fi
             fi
-
             # Extract Endpoints
             grep -oP "(?<=[\"'\`])(https?://[^\"'\` ]+|/[^\"'\` ]+)(?=[\"'\`])" "$asset" \
                 | sort -u >> "$TMP_DIR/raw_endpoints.txt" || true
@@ -181,16 +165,11 @@ echo "🎯 Analyzing endpoints..."
 if [ -f "$TMP_DIR/raw_endpoints.txt" ]; then
     sort -u "$TMP_DIR/raw_endpoints.txt" -o "$TMP_DIR/raw_endpoints.txt"
     sort -u db/endpoints.txt -o db/endpoints.txt
-
     comm -23 "$TMP_DIR/raw_endpoints.txt" db/endpoints.txt > "$TMP_DIR/new_endpoints.txt" || true
-
     if [ -s "$TMP_DIR/new_endpoints.txt" ]; then
         echo -e "\n🎯 *NEW ENDPOINTS*" >> "$ALERT_FILE"
         head -n 10 "$TMP_DIR/new_endpoints.txt" >> "$ALERT_FILE"
-        
-        # Anti-spam for notifications
         [[ $(wc -l < "$TMP_DIR/new_endpoints.txt") -gt 10 ]] && echo "...and more in db/endpoints.txt" >> "$ALERT_FILE"
-        
         cat "$TMP_DIR/new_endpoints.txt" >> db/endpoints.txt
         sort -u db/endpoints.txt -o db/endpoints.txt
     fi
