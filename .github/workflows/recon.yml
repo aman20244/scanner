@@ -1,0 +1,73 @@
+name: 🕵️ Elite Recon ASM Platform
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: recon-global
+  cancel-in-progress: false
+
+jobs:
+  recon-cycle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write 
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: ⚙️ Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: 📦 Install System Dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: 🛠️ Provision Pin-Pointed Tools
+        run: |
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.6.5
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@v1.3.9
+          go install -v github.com/projectdiscovery/katana/cmd/katana@v1.0.4
+          sudo cp ~/go/bin/* /usr/local/bin/
+
+      - name: 🚀 Execute Recon Engine
+        # ✅ FIX 5: Hard Timeout Protection
+        run: |
+          chmod +x recon.sh
+          timeout 2h ./recon.sh
+
+      - name: 💬 Intelligent Alerting
+        if: always()
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        run: |
+          if [ "${{ job.status }}" == "failure" ]; then
+            curl -X POST -H 'Content-type: application/json' --data '{"text":"🚨 *Workflow Failed or Timed Out:* Check GitHub Actions logs."}' $SLACK_WEBHOOK
+          elif [ -s slack_alert.txt ]; then
+            PAYLOAD=$(cat slack_alert.txt | jq -Rs .)
+            curl -X POST -H 'Content-type: application/json' --data "{\"text\": \"🔎 *Recon Sync:* \n${PAYLOAD}\"}" $SLACK_WEBHOOK
+          fi
+
+      - name: 💾 Commit & Atomic Sync
+        if: always()
+        # ✅ FIX 1: Safest possible Git sync order
+        run: |
+          git config --global user.name "Recon-Bot-Automated"
+          git config --global user.email "bot@ci.recon.com"
+          
+          # 1. Pull changes first to resolve any remote state
+          git pull origin main --rebase 
+          
+          # 2. Stage the new database state
+          git add db/
+          
+          # 3. Commit and Push
+          git commit -m "recon: auto-sync db $(date +%F)" || exit 0
+          git push origin main
