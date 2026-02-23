@@ -1,4 +1,4 @@
-name: 🕵️ Elite Recon ASM Platform
+name: Continuous External Attack Surface Monitoring
 
 on:
   schedule:
@@ -6,73 +6,64 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: recon-global
+  group: asm-global
   cancel-in-progress: false
 
 jobs:
-  recon-cycle:
+  asm-cycle:
     runs-on: ubuntu-latest
     permissions:
-      contents: write 
+      contents: write
 
     steps:
-      - name: 📥 Checkout Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: ⚙️ Setup Go Environment
+      - name: Setup Go Environment
         uses: actions/setup-go@v5
         with:
           go-version: '1.21'
-          cache: true # Speeds up subsequent runs
+          cache: true
 
-      - name: 📦 Install System Dependencies
+      - name: Install System Dependencies
         run: |
-          sudo apt-get update 
-          sudo apt-get install -y jq
+          sudo apt-get update
+          sudo apt-get install -y jq curl
 
-      - name: 🛠️ Provision Tools
+      - name: Install ASM Tools
         run: |
-          # Use latest stable versions
-          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install -v github.com/projectdiscovery/katana/cmd/katana@latest
-          # Amass is heavy; installing via snap/apt is often faster in CI
-          sudo apt-get install -y amass 
+          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+          go install github.com/projectdiscovery/katana/cmd/katana@latest
+          go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest
           sudo cp ~/go/bin/* /usr/local/bin/
 
-      - name: 🚀 Execute Recon Engine
+      - name: Execute ASM Engine
         run: |
           chmod +x recon.sh
-          # 2h timeout to prevent hung runners
           timeout 2h ./recon.sh
 
-      - name: 💬 Intelligent Alerting
+      - name: Slack Alerting
         if: always()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: |
-          if [ "${{ job.status }}" == "failure" ]; then
-            curl -X POST -H 'Content-type: application/json' --data '{"text":"🚨 *Workflow Failed:* Check GitHub Actions logs."}' $SLACK_WEBHOOK
-          elif [ -s slack_alert.txt ]; then
-            # The 'jq -Rs .' ensures the text is properly escaped for the JSON payload
+          if [ -n "$SLACK_WEBHOOK" ] && [ -s slack_alert.txt ]; then
             PAYLOAD=$(jq -Rs . < slack_alert.txt)
-            curl -X POST -H 'Content-type: application/json' --data "{\"text\": \"🔎 *Recon Sync:* \n${PAYLOAD}\"}" $SLACK_WEBHOOK
+            curl -s -X POST -H "Content-type: application/json" \
+              --data "{\"text\": ${PAYLOAD}}" \
+              $SLACK_WEBHOOK
           fi
 
-      - name: 💾 Commit & Atomic Sync
+      - name: Commit & Sync State
         if: always()
         run: |
-          git config --global user.name "Recon-Bot"
-          git config --global user.email "bot@ci.recon.com"
-          
-          # Use rebase to avoid merge commits
-          git pull origin main --rebase 
-          
-          # Only add the db folder
+          git config --global user.name "ASM-Bot"
+          git config --global user.email "bot@asm.local"
+          git pull origin main --rebase || true
           git add db/
-          
-          # Only commit if there are changes
-          git diff --quiet && git diff --staged --quiet || (git commit -m "recon: auto-sync $(date +%F)" && git push origin main)
+          git diff --quiet && git diff --staged --quiet || \
+          (git commit -m "asm: state update $(date +%F)" && git push origin main)
