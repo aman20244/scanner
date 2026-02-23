@@ -12,6 +12,7 @@ concurrency:
 jobs:
   asm-cycle:
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
 
@@ -19,8 +20,8 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Setup Go Environment
         uses: actions/setup-go@v5
@@ -51,7 +52,7 @@ jobs:
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: |
-          if [ -n "$SLACK_WEBHOOK" ] && [ -s slack_alert.txt ]; then
+          if [ -n "$SLACK_WEBHOOK" ] && [ -f slack_alert.txt ] && [ -s slack_alert.txt ]; then
             PAYLOAD=$(jq -Rs . < slack_alert.txt)
             curl -s -X POST -H "Content-type: application/json" \
               --data "{\"text\": ${PAYLOAD}}" \
@@ -63,7 +64,12 @@ jobs:
         run: |
           git config --global user.name "ASM-Bot"
           git config --global user.email "bot@asm.local"
-          git pull origin main --rebase || true
+
           git add db/
-          git diff --quiet && git diff --staged --quiet || \
-          (git commit -m "asm: state update $(date +%F)" && git push origin main)
+
+          if ! git diff --cached --quiet; then
+            git commit -m "asm: state update $(date +%F)"
+            git push
+          else
+            echo "No changes detected"
+          fi
