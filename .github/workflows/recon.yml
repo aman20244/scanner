@@ -40,6 +40,8 @@ jobs:
           go install github.com/projectdiscovery/httpx/cmd/httpx@latest
           go install github.com/projectdiscovery/katana/cmd/katana@latest
           go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest
+          go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+          go install github.com/tomnomnom/anew@latest
           sudo cp ~/go/bin/* /usr/local/bin/
 
       - name: Execute ASM Engine
