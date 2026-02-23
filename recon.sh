@@ -54,7 +54,7 @@ cat "$TMP_DIR/"*.txt 2>/dev/null \
 # ==========================================
 
 echo "🛡️ Filtering Wildcard DNS..."
-dnsx -l "$TMP_DIR/subs_raw.txt" -silent -wd -o "$TMP_DIR/subs_resolved.txt"
+dnsx -l "$TMP_DIR/subs_raw.txt" -silent -o "$TMP_DIR/subs_resolved.txt"
 
 # ==========================================
 # 🧠 3. STATE MANAGEMENT
@@ -76,7 +76,7 @@ echo "📊 Total subdomains tracked: $TOTAL"
 # ==========================================
 
 echo "🩺 Probing with httpx..."
-httpx -l db/subdomains.txt -silent -t 50 -rl 100 -status-code -no-color \
+httpx -l db/subdomains.txt -status-code  \
   > "$TMP_DIR/health.txt" || true
 
 awk '{gsub(/\[|\]/,"",$2); print $1"|"$2}' "$TMP_DIR/health.txt" \
