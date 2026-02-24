@@ -2,7 +2,7 @@ name: Continuous External Attack Surface Monitoring
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # Runs every 6 hours
+    - cron: '0 */2 * * *'   # Runs every 6 hours
   workflow_dispatch:        # Allows manual trigger from the Actions tab
 
 concurrency:
@@ -48,7 +48,6 @@ jobs:
         run: |
           go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install github.com/projectdiscovery/katana/cmd/katana@latest
           go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest
           go install github.com/tomnomnom/anew@latest
           go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
