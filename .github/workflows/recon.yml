@@ -2,7 +2,7 @@ name: Continuous External Attack Surface Monitoring
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 */6 * * *'   # Every 6 hours
   workflow_dispatch:
 
 concurrency:
@@ -12,9 +12,9 @@ concurrency:
 jobs:
   asm-cycle:
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
+    timeout-minutes: 250
 
     steps:
       - name: Checkout Repository
@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Setup Go Environment
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.21'
@@ -32,7 +32,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq curl
+          sudo apt-get install -y jq curl unzip
 
       - name: Install ASM Tools
         run: |
@@ -44,10 +44,17 @@ jobs:
           go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
           sudo cp ~/go/bin/* /usr/local/bin/
 
-      - name: Execute ASM Engine
+      - name: Cache Go Binaries
+        uses: actions/cache@v3
+        with:
+          path: ~/go/bin
+          key: go-bin-${{ runner.os }}-${{ hashFiles('**/recon.sh') }}
+          restore-keys: |
+            go-bin-${{ runner.os }}-
+
+      - name: Run Recon Engine
         run: |
           chmod +x recon.sh
-          # Increased timeout to 4h for large workloads
           timeout 4h ./recon.sh
 
       - name: Slack Alerting
@@ -62,25 +69,14 @@ jobs:
               $SLACK_WEBHOOK
           fi
 
-      - name: Commit & Sync State
+      - name: Commit Database Updates
         if: always()
         run: |
           git config --global user.name "ASM-Bot"
           git config --global user.email "bot@asm.local"
-
           git add db/
-
           if ! git diff --cached --quiet; then
             git commit -m "asm: state update $(date +%F)"
             git push
           else
             echo "No changes detected"
-          fi
-
-      - name: Cache Go Binaries
-        uses: actions/cache@v3
-        with:
-          path: ~/go/bin
-          key: ${{ runner.os }}-go-bin-${{ hashFiles('**/recon.sh') }}
-          restore-keys: |
-            ${{ runner.os }}-go-bin-
