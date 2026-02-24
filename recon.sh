@@ -6,7 +6,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-export CHAOS_KEY="${CHAOS_KEY:-}"   # Ensure Chaos API key is exported
+export CHAOS_KEY="${CHAOS_KEY:-}"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -72,12 +72,13 @@ TOTAL=$(wc -l < db/subdomains.txt)
 echo "📊 Total subdomains tracked: $TOTAL"
 
 # ==========================================
-# 🩺 4. HEALTH MONITORING
+# 🩺 4. HEALTH MONITORING (FIXED)
 # ==========================================
 
 echo "🩺 Probing with httpx..."
-cat db/subdomains.txt | httpx -status-code  \
-  > "$TMP_DIR/health.txt" || true
+cat "$TMP_DIR/subs_resolved.txt" \
+| httpx -status-code -http -https -silent -no-color \
+> "$TMP_DIR/health.txt" 2>/dev/null || true
 
 awk '{gsub(/\[|\]/,"",$2); print $1"|"$2}' "$TMP_DIR/health.txt" \
 | sort -u > "$TMP_DIR/current_health.txt"
@@ -99,7 +100,7 @@ echo "🌐 Live hosts: $LIVE"
 # 📦 5. JS MONITORING
 # ==========================================
 
-touch "$TMP_DIR/js_list.txt"  # Safety if no live hosts
+touch "$TMP_DIR/js_list.txt"
 
 if [ -s "$TMP_DIR/live_hosts.txt" ]; then
   echo "📦 Crawling JS with katana..."
@@ -119,7 +120,7 @@ process_js() {
 export -f process_js
 export TMP_DIR
 
-cat "$TMP_DIR/js_list.txt" 2>/dev/null \
+cat "$TMP_DIR/js_list.txt" \
 | while read -r js; do process_js "$js"; done \
 > "$TMP_DIR/js_hashes.txt" || true
 
@@ -164,7 +165,7 @@ fi
 
 if [ -s "$ALERT_FILE" ]; then
   echo -e "\n📢 Recon Alerts Generated"
-  if [ -n "$SLACK_WEBHOOK" ]; then
+  if [ -n "${SLACK_WEBHOOK:-}" ]; then
     curl -s -X POST -H "Content-type: application/json" \
       --data "$(jq -n --arg msg "$(cat slack_alert.txt)" '{text:$msg}')" \
       "$SLACK_WEBHOOK"
