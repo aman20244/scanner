@@ -76,7 +76,7 @@ echo "📊 Total subdomains tracked: $TOTAL"
 # ==========================================
 
 echo "🩺 Probing with httpx..."
-httpx -l db/subdomains.txt -status-code  \
+cat db/subdomains.txt | httpx -status-code  \
   > "$TMP_DIR/health.txt" || true
 
 awk '{gsub(/\[|\]/,"",$2); print $1"|"$2}' "$TMP_DIR/health.txt" \
