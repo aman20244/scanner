@@ -2,8 +2,8 @@ name: Continuous External Attack Surface Monitoring
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # Every 6 hours
-  workflow_dispatch:
+    - cron: '0 */6 * * *'   # Runs every 6 hours
+  workflow_dispatch:        # Allows manual trigger from the Actions tab
 
 concurrency:
   group: asm-global
@@ -13,7 +13,7 @@ jobs:
   asm-cycle:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write       # Essential for pushing DB updates back to repo
     timeout-minutes: 250
 
     steps:
@@ -27,14 +27,24 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.21'
-          cache: true
+          cache: false      # Manual binary caching implemented below
+
+      - name: Cache Go Binaries
+        id: cache-bins
+        uses: actions/cache@v3
+        with:
+          path: ~/go/bin
+          key: go-bin-${{ runner.os }}-${{ hashFiles('recon.sh') }}
+          restore-keys: |
+            go-bin-${{ runner.os }}-
 
       - name: Install System Dependencies
         run: |
-          sudo apt-get update
+          sudo apt-get update -qq
           sudo apt-get install -y jq curl unzip
 
       - name: Install ASM Tools
+        if: steps.cache-bins.outputs.cache-hit != 'true'
         run: |
           go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install github.com/projectdiscovery/httpx/cmd/httpx@latest
@@ -42,31 +52,37 @@ jobs:
           go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest
           go install github.com/tomnomnom/anew@latest
           go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-          sudo cp ~/go/bin/* /usr/local/bin/
 
-      - name: Cache Go Binaries
-        uses: actions/cache@v3
-        with:
-          path: ~/go/bin
-          key: go-bin-${{ runner.os }}-${{ hashFiles('**/recon.sh') }}
-          restore-keys: |
-            go-bin-${{ runner.os }}-
+      - name: Add Go Bin to PATH
+        run: |
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+          # Ensure tools are executable
+          chmod +x $HOME/go/bin/* || true
 
       - name: Run Recon Engine
+        env:
+          CHAOS_KEY: ${{ secrets.CHAOS_KEY }}
         run: |
           chmod +x recon.sh
-          timeout 4h ./recon.sh
+          # 220m timeout allows 30m for alerting/committing before job limit
+          timeout 220m ./recon.sh || echo "Recon timed out early, processing collected data."
 
       - name: Slack Alerting
         if: always()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: |
-          if [ -n "$SLACK_WEBHOOK" ] && [ -f slack_alert.txt ] && [ -s slack_alert.txt ]; then
-            PAYLOAD=$(jq -Rs . < slack_alert.txt)
-            curl -s -X POST -H "Content-type: application/json" \
+          if [ -n "${SLACK_WEBHOOK:-}" ] && [ -s slack_alert.txt ]; then
+            # Slack limits payloads to ~4000 characters. 
+            # We truncate to 3500 to stay safe and avoid 400 Bad Request errors.
+            PAYLOAD=$(head -c 3500 slack_alert.txt | jq -Rs .)
+            curl -s -X POST \
+              -H "Content-type: application/json" \
               --data "{\"text\": ${PAYLOAD}}" \
-              $SLACK_WEBHOOK
+              "$SLACK_WEBHOOK"
+            echo "Slack alert sent."
+          else
+            echo "No alert to send (file empty or webhook missing)."
           fi
 
       - name: Commit Database Updates
@@ -75,8 +91,10 @@ jobs:
           git config --global user.name "ASM-Bot"
           git config --global user.email "bot@asm.local"
           git add db/
+          # Only commit if there are actual changes in the database
           if ! git diff --cached --quiet; then
-            git commit -m "asm: state update $(date +%F)"
-            git push
+            git commit -m "asm: state update $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push origin main || git push origin master
           else
-            echo "No changes detected"
+            echo "No database changes to commit."
+          fi
